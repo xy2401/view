@@ -69,7 +69,19 @@ function setMetadata(entry: Entry, size?: string | null, modified?: string | nul
   }
 }
 
-export function parseAutoindex(html: string, base: URL): Entry[] {
+export function hostedThumbnail(href: string | undefined, file: URL, base: URL): string | undefined {
+  if (!href || file.search || file.pathname.endsWith('/')) return
+  const expected = new URL(file)
+  expected.search = 'thumbnail=1'
+  // Accept only the derivative of this exact file. Never forward an arbitrary URL from a listing.
+  try {
+    if (new URL(href, base).href === expected.href) return expected.href
+  } catch {
+    // Ignore malformed optional metadata. The file itself still belongs in the listing.
+  }
+}
+
+export function parseAutoindex(html: string, base: URL, hosted = false): Entry[] {
   const template = document.createElement('template')
   template.innerHTML = html
   const page = template.content
@@ -83,12 +95,15 @@ export function parseAutoindex(html: string, base: URL): Entry[] {
   for (const anchor of page.querySelectorAll<HTMLAnchorElement>('a[href]')) {
     const url = directChild(anchor.getAttribute('href')!, base)
     if (!url) continue
-    const entry = {
+    const entry: Entry = {
       url: url.href,
       directory: url.pathname.endsWith('/'),
       name: isViewListing ? anchor.dataset.name || filename(url) : filename(url),
     }
-    if (isViewListing) setMetadata(entry, anchor.dataset.size, anchor.dataset.modified)
+    if (isViewListing) {
+      setMetadata(entry, anchor.dataset.size, anchor.dataset.modified)
+      if (hosted) entry.thumbnailUrl = hostedThumbnail(anchor.dataset.thumbnail, url, base)
+    }
     entries.set(entry.url, entry)
   }
   return Array.from(entries.values())

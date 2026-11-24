@@ -1,7 +1,8 @@
 import { chmod, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { packager } from '@electron/packager'
 
@@ -10,29 +11,30 @@ const { version: electronVersion } = require('electron/package.json')
 const desktopDir = fileURLToPath(new URL('../', import.meta.url))
 const webDist = fileURLToPath(new URL('../../web/dist/', import.meta.url))
 const outputDir = fileURLToPath(new URL('../../../dist/desktop/', import.meta.url))
-const { version } = JSON.parse(await readFile(join(desktopDir, 'package.json'), 'utf8'))
 const stage = await mkdtemp(join(tmpdir(), 'view-package-'))
 
-function isRuntimeSource(path) {
-  const name = basename(path)
-  return !['test', 'tests', '__tests__'].includes(name) && !/\.(test|spec)\.[^.]+$/.test(name)
-}
-
 try {
-  const manifest = {
-    name: 'view',
-    productName: 'View',
-    version,
-    private: true,
-    main: 'src/main/index.mjs',
-  }
+  // Deploy the locked production graph for the host, including sharp's optional
+  // platform binary and libvips. A hoisted stage packages cleanly on Windows too.
+  const cli = process.env.npm_execpath ?? 'pnpm'
+  const args = [
+    '--filter',
+    '@view/desktop',
+    '--config.inject-workspace-packages=true',
+    '--config.node-linker=hoisted',
+    'deploy',
+    '--prod',
+    stage,
+  ]
+  const jsCli = /\.[cm]?js$/i.test(cli)
+  execFileSync(jsCli ? process.execPath : cli, jsCli ? [cli, ...args] : args, {
+    cwd: desktopDir,
+    stdio: 'inherit',
+  })
+  const manifest = JSON.parse(await readFile(join(stage, 'package.json'), 'utf8'))
+  manifest.name = 'view'
+  delete manifest.scripts
   await writeFile(join(stage, 'package.json'), JSON.stringify(manifest, null, 2))
-  for (const name of ['main', 'sharing', 'preload']) {
-    await cp(join(desktopDir, 'src', name), join(stage, 'src', name), {
-      recursive: true,
-      filter: isRuntimeSource,
-    })
-  }
   const paths = await packager({
     dir: stage,
     out: outputDir,
@@ -58,6 +60,9 @@ try {
     },
     // The HTTP server streams the same web assets through ordinary file descriptors.
     extraResource: webDist,
+    // Native addons and their adjacent dynamic libraries must be real files.
+    asar: false,
+    ignore: [/^\/pnpm-(lock|workspace)\.yaml$/, /^\/node_modules\/\./],
     // The electron install script and Packager use the same @electron/get cache.
     download: { cacheRoot: process.env.electron_config_cache },
     overwrite: true,

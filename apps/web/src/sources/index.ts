@@ -55,7 +55,7 @@ export async function listEntries(place: Place, url: string, signal?: AbortSigna
       ? parseWebdav(content, base, authenticated).map((entry) =>
           entry.directory ? entry : { ...entry, url: davFileUrl(place.url, entry.url) },
         )
-      : parseAutoindex(content, base)
+      : parseAutoindex(content, base, place.kind === 'hosted')
   }
   return entries.sort(
     (a, b) => Number(b.directory) - Number(a.directory) || byName.compare(a.name, b.name),

@@ -7,6 +7,7 @@ import { startSharing } from '../sharing/server.mjs'
 import { openLibrary } from './library.mjs'
 import { filesFromArgv } from './open-files.mjs'
 import { createAssetHandler, fileResponse } from './protocols.mjs'
+import { createThumbnailCache } from './thumbnail-cache.mjs'
 
 const appUrl = 'view-app://app/index.html'
 const preload = fileURLToPath(new URL('../preload/index.cjs', import.meta.url))
@@ -96,10 +97,37 @@ function createWindow() {
   return window.loadURL(appUrl)
 }
 
+function thumbnailDirectory() {
+  const home = app.getPath('home')
+  if (process.platform === 'darwin') return path.join(home, 'Library', 'Caches', 'View', 'thumbnails')
+  if (process.platform === 'win32') {
+    const local = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local')
+    return path.join(local, 'View', 'Cache', 'thumbnails')
+  }
+  const cache = process.env.XDG_CACHE_HOME
+  return path.join(
+    cache && path.isAbsolute(cache) ? cache : path.join(home, '.cache'),
+    'View',
+    'thumbnails',
+  )
+}
+
 async function initialize() {
-  const library = await openLibrary(path.join(app.getPath('userData'), 'locations.json'))
+  const thumbnailCacheDirectory = thumbnailDirectory()
+  const thumbnails = createThumbnailCache({
+    directory: thumbnailCacheDirectory,
+    generate: async (filename) => (await import('./render-thumbnail.mjs')).renderThumbnail(filename),
+  })
+  app.once('will-quit', () => thumbnails.close())
+  const library = await openLibrary(path.join(app.getPath('userData'), 'locations.json'), {
+    onThumbnailRootRemoved: (root) => thumbnails.discardRoot(root),
+  })
+  function getThumbnail(filename, signal) {
+    const root = library.thumbnailRoot(filename)
+    return root ? thumbnails.get(root, filename, signal) : null
+  }
   protocol.handle('view-app', createAssetHandler(webRoot, net))
-  protocol.handle('view-file', (request) => fileResponse(request, library))
+  protocol.handle('view-file', (request) => fileResponse(request, library, getThumbnail))
   function allowsUiPermission(contents, permission, url) {
     return (
       contents === window?.webContents &&
@@ -159,7 +187,13 @@ async function initialize() {
     queueService(async () => {
       if (server) return
       const key = randomBytes(12).toString('base64url')
-      const service = await startSharing({ webRoot, getShares: library.shares, accessKey: key })
+      const service = await startSharing({
+        webRoot,
+        getShares: library.shares,
+        accessKey: key,
+        thumbnailCacheDirectory,
+        getThumbnail: (filename, _shareRoot, signal) => getThumbnail(filename, signal),
+      })
       server = { service, info: { url: 'http://' + lanAddress() + ':' + service.port + '/', key } }
     }),
   )
@@ -186,7 +220,9 @@ if (app.requestSingleInstanceLock({ files: launchFiles })) {
   app.on('second-instance', (_event, argv, cwd, data) => {
     // Chromium can reorder argv for forwarded instances. Prefer the paths
     // the second process already resolved relative to its own working directory.
-    queueOpenFiles(Array.isArray(data?.files) ? data.files : filesFromArgv(argv, cwd, process.defaultApp))
+    queueOpenFiles(
+      Array.isArray(data?.files) ? data.files : filesFromArgv(argv, cwd, process.defaultApp),
+    )
   })
   app
     .whenReady()

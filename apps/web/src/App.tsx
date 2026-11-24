@@ -68,7 +68,7 @@ function isUnauthorized(err: unknown) {
   return err instanceof Error && 'status' in err && err.status === 401
 }
 function hostedRoot(): Place {
-  return { name: '共享位置', kind: 'autoindex', url: new URL('/files/', location.href).href }
+  return { name: '共享位置', kind: 'hosted', url: new URL('/files/', location.href).href }
 }
 async function authenticate(body: { key: string } | { pairingToken: string }) {
   const res = await fetch('/api/session', {
@@ -769,7 +769,13 @@ export default function App() {
                   </button>
                 </Empty>
               ) : entries.length ? (
-                <Files entries={entries} layout={layout} selected={selected} onOpen={openEntry} />
+                <Files
+                  entries={entries}
+                  layout={layout}
+                  selected={selected}
+                  onOpen={openEntry}
+                  allowOriginalThumbnails={mode === 'static'}
+                />
               ) : (
                 <Empty icon={<FolderOpen />} title="空文件夹" />
               )}

@@ -4,6 +4,7 @@ import { open, stat } from 'node:fs/promises'
 import { Readable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
 import { byteRange } from '../sharing/byte-range.mjs'
+import { supportsThumbnail } from '../sharing/thumbnail-types.mjs'
 
 const types = {
   jpg: 'image/jpeg',
@@ -32,7 +33,7 @@ const types = {
   json: 'text/plain',
 }
 
-export async function fileResponse(request, library) {
+export async function fileResponse(request, library, getThumbnail) {
   if (!['GET', 'HEAD'].includes(request.method)) return new Response(null, { status: 405 })
   let handle
   try {
@@ -45,6 +46,20 @@ export async function fileResponse(request, library) {
     const current = await stat(await library.resolveUrl(request.url))
     if (!info.isFile() || current.dev !== info.dev || current.ino !== info.ino) {
       return new Response(null, { status: 404 })
+    }
+    if (new URL(request.url).searchParams.get('thumbnail') === '1') {
+      const thumb = supportsThumbnail(target) && (await getThumbnail?.(target, request.signal))
+      if (!thumb || (await library.resolveUrl(request.url)) !== target)
+        return new Response(null, { status: 404 })
+      return new Response(request.method === 'HEAD' ? null : thumb.data, {
+        headers: {
+          'Content-Type': thumb.mime,
+          'Content-Length': String(thumb.data.length),
+          'Cache-Control': 'no-store',
+          'Access-Control-Allow-Origin': 'view-app://app',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      })
     }
     const ext = path.extname(target).slice(1).toLowerCase()
     const type = Object.hasOwn(types, ext) ? types[ext] : 'application/octet-stream'

@@ -6,6 +6,11 @@
   "productName": "View",
   "type": "module",
   "main": "src/main/index.mjs",
+  "files": [
+    "src",
+    "!src/**/*.{test,spec}.*",
+    "!src/**/{test,tests,__tests__}/**"
+  ],
   "scripts": {
     "start": "electron .",
     "test": "node --test",
@@ -14,5 +19,8 @@
   "devDependencies": {
     "@electron/packager": "20.3.0",
     "electron": "45.4.1"
+  },
+  "dependencies": {
+    "sharp": "0.35.5"
   }
 }

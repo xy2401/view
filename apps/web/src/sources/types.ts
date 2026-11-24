@@ -4,11 +4,12 @@ export interface LocationRef {
 }
 
 export interface Place extends LocationRef {
-  kind: 'autoindex' | 'webdav' | 'local'
+  kind: 'autoindex' | 'webdav' | 'local' | 'hosted'
 }
 
 export interface Entry extends LocationRef {
   directory: boolean
+  thumbnailUrl?: string
   size?: number
   modified?: string
 }

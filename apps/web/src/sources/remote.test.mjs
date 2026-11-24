@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { directChild, isSafeDavPath, normalizeRemoteUrl } from './remote.ts'
+import { directChild, hostedThumbnail, isSafeDavPath, normalizeRemoteUrl } from './remote.ts'
 
 test('directory addresses keep their encoding and drop fragments', () => {
   const root = normalizeRemoteUrl('https://example.org/私人/100%25?view=1#ignore')
@@ -27,4 +27,18 @@ test('authenticated WebDAV scope excludes ambiguous path encodings', () => {
     assert.equal(isSafeDavPath('/private/' + segment + '/'), false)
   }
   assert.equal(isSafeDavPath('/private/' + encodeURIComponent('旅行 100%#?.txt')), true)
+})
+
+test('hosted thumbnail metadata identifies only the listed file and thumbnail query', () => {
+  const root = new URL('https://view.test/files/id/')
+  const name = encodeURIComponent('旅行 %2F &.png')
+  const file = new URL(name, root)
+  assert.equal(hostedThumbnail(name + '?thumbnail=1', file, root), file.href + '?thumbnail=1')
+  for (const href of [
+    undefined, 'http://[', '../folder/name.png?thumbnail=1', '//elsewhere.test/files/id/a?thumbnail=1',
+    'other.png?thumbnail=1', file.href + '?redirect=1', file.href + '?thumbnail=1#fragment',
+    file.href.replace('view.test', 'user@view.test') + '?thumbnail=1',
+  ]) {
+    assert.equal(hostedThumbnail(href, file, root), undefined)
+  }
 })

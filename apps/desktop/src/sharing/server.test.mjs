@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -17,6 +17,7 @@ test('browse the authenticated virtual root and revoke access to an existing fil
     writeFile(path.join(folder, 'index.html'), '<title>File</title>'),
     writeFile(path.join(folder, 'film.mp4'), '0123456789'),
     writeFile(path.join(folder, 'empty.txt'), ''),
+    writeFile(path.join(folder, 'photo.jpg'), 'original'),
   ])
   let shares = [{ id: 'root-a', name: 'A & B', path: photoRoot }]
   const key = 'a-test-key'
@@ -60,6 +61,8 @@ test('browse the authenticated virtual root and revoke access to an existing fil
   assert.ok(firstDirectory.includes('href="' + encodeURIComponent('旅行 合照') + '/"'))
   const listing = await (await read(album)).text()
   assert.match(listing, /href="index.html"/)
+  assert.doesNotMatch(listing, /data-thumbnail/)
+  assert.equal((await read(album + 'photo.jpg?thumbnail=1')).status, 404)
   const document = await read(album + 'index.html')
   assert.equal(document.headers.get('content-disposition'), 'attachment')
   assert.equal(await document.text(), '<title>File</title>')
@@ -90,4 +93,103 @@ test('browse the authenticated virtual root and revoke access to an existing fil
   const pairingToken = server.createPairingToken()
   assert.equal((await login({ pairingToken })).status, 204)
   assert.equal((await login({ pairingToken })).status, 401)
+})
+
+test('advertise thumbnails lazily and serve them only from a current, authorized share', async (t) => {
+  const directory = await realpath(await mkdtemp(path.join(tmpdir(), 'view-sharing-thumb-')))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const photo = path.join(directory, '旅行 & 照片.JPG')
+  const cache = path.join(directory, 'cache')
+  const original = Buffer.from('original image bytes')
+  const smaller = Buffer.from('preview')
+  await Promise.all([
+    writeFile(photo, original),
+    writeFile(path.join(directory, 'broken.png'), 'invalid image'),
+    writeFile(path.join(directory, 'notes.txt'), 'text'),
+    mkdir(path.join(directory, 'album.jpg')),
+    mkdir(path.join(directory, 'other', 'cache'), { recursive: true }),
+  ])
+  const home = { id: 'home', name: 'Home', path: directory }
+  let shares = [home]
+  const calls = []
+  let revokeDuringDecode = false
+  const server = await startSharing({
+    host: '127.0.0.1',
+    webRoot: directory,
+    getShares: () => shares,
+    accessKey: 'test',
+    thumbnailCacheDirectory: cache,
+    getThumbnail: async (file, root, signal) => {
+      calls.push(file)
+      assert.equal(root, directory)
+      assert.ok(signal instanceof AbortSignal)
+      if (revokeDuringDecode) shares = []
+      return file === photo ? { data: smaller, mime: 'image/jpeg' } : null
+    },
+  })
+  t.after(() => server.stop())
+  const origin = 'http://127.0.0.1:' + server.port
+  const raw = '/files/home/' + encodeURIComponent(path.basename(photo))
+  const thumbnail = raw + '?thumbnail=1&v=first'
+  assert.equal((await fetch(origin + thumbnail)).status, 401)
+  const session = await fetch(origin + '/api/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: 'test' }),
+  })
+  const cookie = session.headers.get('set-cookie').split(';')[0]
+  const read = (url, method = 'GET') => fetch(origin + url, { headers: { Cookie: cookie }, method })
+  const listing = await (await read('/files/home/')).text()
+  assert.ok(
+    listing.includes('data-thumbnail="' + encodeURIComponent(path.basename(photo)) + '?thumbnail=1"'),
+  )
+  assert.ok(
+    listing.includes(
+      'data-size="' +
+        original.length +
+        '" data-modified="' +
+        (await stat(photo)).mtime.toISOString() +
+        '"',
+    ),
+  )
+  assert.doesNotMatch(listing, /data-thumbnail="(?:notes.txt|album.jpg)/)
+  assert.equal((await read('/files/home/notes.txt?thumbnail=1')).status, 404)
+  assert.deepEqual(calls, [])
+
+  const response = await read(thumbnail)
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('content-type'), 'image/jpeg')
+  assert.equal(response.headers.get('cache-control'), 'no-store')
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), smaller)
+  const head = await read(thumbnail, 'HEAD')
+  assert.equal(head.headers.get('content-length'), String(smaller.length))
+  assert.equal(await head.text(), '')
+  assert.equal((await read('/files/home/broken.png?thumbnail=1')).status, 404)
+  assert.deepEqual(Buffer.from(await (await read(raw)).arrayBuffer()), original)
+
+  // The cache can be created after sharing begins. Even an explicitly shared cache stays invisible.
+  await mkdir(cache)
+  await writeFile(path.join(cache, 'derived.jpg'), smaller)
+  shares.push({ id: 'private-cache', name: 'Private', path: cache })
+  assert.doesNotMatch(await (await read('/files/')).text(), /private-cache/)
+  assert.doesNotMatch(await (await read('/files/home/')).text(), /href="cache\//)
+  assert.match(await (await read('/files/home/other/')).text(), /href="cache\//)
+  assert.equal((await fetch(origin + '/cache/derived.jpg')).status, 404)
+  const blocked = ['/files/private-cache/', '/files/home/cache/', '/files/home/cache/derived.jpg']
+  if (process.platform !== 'win32') {
+    await symlink(cache, path.join(directory, 'alias'))
+    await symlink(path.join(cache, 'derived.jpg'), path.join(directory, 'alias.jpg'))
+    assert.doesNotMatch(await (await read('/files/home/')).text(), /href="alias/)
+    blocked.push('/files/home/alias/derived.jpg', '/files/home/alias.jpg')
+  }
+  const count = calls.length
+  for (const url of blocked) {
+    assert.equal((await read(url)).status, 404)
+    assert.equal((await read(url + '?thumbnail=1')).status, 404)
+  }
+  assert.equal(calls.length, count)
+  revokeDuringDecode = true
+  assert.equal((await read(thumbnail)).status, 404)
+  assert.equal((await read(thumbnail)).status, 404)
+  assert.equal(calls.length, count + 1)
 })

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { supportsThumbnail } from '../sharing/thumbnail-types.mjs'
 
 function within(root, target) {
   const relative = path.relative(root, target)
@@ -11,6 +12,11 @@ function nameOf(directory) {
   return path.basename(directory) || directory
 }
 
+function includeRoot(roots, directory) {
+  if (roots.some((root) => within(root, directory))) return roots
+  return [...roots.filter((root) => !within(directory, root)), directory]
+}
+
 function validRecord(record) {
   return (
     record &&
@@ -18,12 +24,16 @@ function validRecord(record) {
     /^[a-f0-9-]{36}$/.test(record.id) &&
     typeof record.path === 'string' &&
     path.isAbsolute(record.path) &&
+    (record.thumbnailRoot === undefined ||
+      (typeof record.thumbnailRoot === 'string' &&
+        path.isAbsolute(record.thumbnailRoot) &&
+        within(record.thumbnailRoot, record.path))) &&
     typeof record.favorite === 'boolean' &&
     typeof record.shared === 'boolean'
   )
 }
 
-export async function openLibrary(configPath) {
+export async function openLibrary(configPath, { onThumbnailRootRemoved } = {}) {
   let saved = []
   try {
     saved = JSON.parse(await readFile(configPath, 'utf8'))
@@ -36,7 +46,39 @@ export async function openLibrary(configPath) {
 
   // Grants live for this desktop session. Only favorites and shares survive a restart.
   const grants = new Map(saved.map((record) => [record.id, record.path]))
+  // A cached image can belong to a broader import than its current file-read grant.
+  let cacheRoots = saved.reduce(
+    (roots, record) => includeRoot(roots, record.thumbnailRoot ?? record.path),
+    [],
+  )
   let pending = Promise.resolve()
+
+  function serialize(operation) {
+    const update = pending.then(operation)
+    pending = update.catch(() => {})
+    return update
+  }
+
+  function rememberOwners(records, roots) {
+    return records.map((record) => {
+      const owner = roots.find((root) => within(root, record.path))
+      return owner && owner !== (record.thumbnailRoot ?? record.path)
+        ? { ...record, thumbnailRoot: owner }
+        : record
+    })
+  }
+
+  async function persist(records) {
+    await mkdir(path.dirname(configPath), { recursive: true })
+    const tmp = configPath + '.' + randomUUID() + '.tmp'
+    try {
+      await writeFile(tmp, JSON.stringify(records), { mode: 0o600, flag: 'wx' })
+      await rename(tmp, configPath)
+      saved = records
+    } finally {
+      await rm(tmp, { force: true })
+    }
+  }
 
   function urlFor(target, directory) {
     for (const [id, root] of grants) {
@@ -52,15 +94,29 @@ export async function openLibrary(configPath) {
   }
 
   function grantDirectory(root) {
-    if (![...grants.values()].some((parent) => within(parent, root))) grants.set(randomUUID(), root)
-    return place(root)
+    return serialize(async () => {
+      const roots = includeRoot(cacheRoots, root)
+      if (roots !== cacheRoots) {
+        const records = rememberOwners(saved, roots)
+        if (records.some((record, i) => record !== saved[i])) await persist(records)
+        const previousRoots = cacheRoots
+        cacheRoots = roots
+        for (const previous of previousRoots) {
+          if (within(root, previous)) onThumbnailRootRemoved?.(previous)
+        }
+      }
+      if (![...grants.values()].some((parent) => within(parent, root))) grants.set(randomUUID(), root)
+      return place(root)
+    })
   }
 
   function entry(target, info) {
+    const url = urlFor(target, info.isDirectory())
     return {
       name: nameOf(target),
       directory: info.isDirectory(),
-      url: urlFor(target, info.isDirectory()),
+      url,
+      ...(info.isFile() && supportsThumbnail(target) ? { thumbnailUrl: url + '?thumbnail=1' } : {}),
       size: info.isFile() ? info.size : undefined,
       modified: info.mtime.toISOString(),
     }
@@ -97,30 +153,26 @@ export async function openLibrary(configPath) {
     const stored = !value && saved.find((record) => urlFor(record.path, true) === url)
     const dir = stored ? stored.path : await resolveUrl(url)
     if (!stored && !(await stat(dir)).isDirectory()) throw new Error('请选择文件夹')
-    const update = pending.then(async () => {
+    return serialize(async () => {
       const previous = saved.find((record) => record.path === dir)
       if ((previous?.[field] ?? false) === value) return
       const id = previous?.id ?? [...grants].find(([, root]) => root === dir)?.[0] ?? randomUUID()
       const record = { id, path: dir, favorite: false, shared: false, ...previous, [field]: value }
       const updated = saved.filter((item) => item.path !== dir)
       if (record.favorite || record.shared) updated.push(record)
-      await mkdir(path.dirname(configPath), { recursive: true })
-      const tmp = configPath + '.' + randomUUID() + '.tmp'
-      try {
-        await writeFile(tmp, JSON.stringify(updated), { mode: 0o600, flag: 'wx' })
-        await rename(tmp, configPath)
-      } finally {
-        await rm(tmp, { force: true })
-      }
-      saved = updated
+      await persist(rememberOwners(updated, cacheRoots))
     })
-    pending = update.catch(() => {})
-    return update
   }
 
   return {
     setFlag,
     resolveUrl,
+    // Call after resolving and authorizing the actual file in the local or HTTP reader.
+    thumbnailRoot(target) {
+      if (typeof target !== 'string' || !path.isAbsolute(target)) return null
+      if (![...grants.values()].some((root) => within(root, target))) return null
+      return cacheRoots.find((root) => within(root, target)) ?? null
+    },
     async select(directory) {
       const root = await realpath(directory)
       if (!(await stat(root)).isDirectory()) throw new Error('请选择文件夹')
@@ -130,7 +182,7 @@ export async function openLibrary(configPath) {
       const target = await realpath(filename)
       const info = await stat(target)
       if (!info.isFile()) throw new Error('请选择普通文件')
-      const folder = grantDirectory(path.dirname(target))
+      const folder = await grantDirectory(path.dirname(target))
       return { folder, file: entry(target, info) }
     },
     async list(url) {

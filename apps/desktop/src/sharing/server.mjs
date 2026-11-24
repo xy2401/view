@@ -1,10 +1,11 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { constants } from 'node:fs'
-import { open, readdir, realpath, stat } from 'node:fs/promises'
+import { lstat, open, readdir, realpath, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { byteRange } from './byte-range.mjs'
+import { supportsThumbnail } from './thumbnail-types.mjs'
 
 const SESSION_SECONDS = 12 * 60 * 60
 const contentTypes = {
@@ -145,11 +146,45 @@ function contained(root, candidate) {
   return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)
 }
 
-async function resolveInside(root, segments) {
+// Resolve existing ancestors when a configured directory has not been created yet.
+async function realLocation(candidate) {
+  try {
+    return await realpath(candidate)
+  } catch (error) {
+    if (error.code !== 'ENOENT' || path.dirname(candidate) === candidate) throw error
+    return path.join(await realLocation(path.dirname(candidate)), path.basename(candidate))
+  }
+}
+
+async function resolveInside(root, segments, excludedRoot) {
   const canonicalRoot = await realpath(root)
-  const target = await realpath(path.join(canonicalRoot, ...segments))
-  if (!contained(canonicalRoot, target)) throw new HttpError(404, 'Not found')
+  if (excludedRoot && contained(excludedRoot, canonicalRoot)) throw new HttpError(404, 'Not found')
+  let target = canonicalRoot
+  if (excludedRoot && contained(canonicalRoot, excludedRoot)) {
+    // Check each directory so that entering a symlink to the cache is also denied.
+    for (const segment of segments) {
+      target = await realpath(path.join(target, segment))
+      if (contained(excludedRoot, target) || !contained(canonicalRoot, target))
+        throw new HttpError(404, 'Not found')
+    }
+  } else {
+    target = await realpath(path.join(canonicalRoot, ...segments))
+    if (!contained(canonicalRoot, target)) throw new HttpError(404, 'Not found')
+  }
   return { target, canonicalRoot }
+}
+
+async function visibleShares(shares, excludedRoot) {
+  if (!excludedRoot) return shares
+  const visible = []
+  for (const share of shares) {
+    try {
+      if (!contained(excludedRoot, await realLocation(share.path))) visible.push(share)
+    } catch (error) {
+      if (!['ENOTDIR', 'ELOOP', 'EACCES', 'EPERM'].includes(error.code)) throw error
+    }
+  }
+  return visible
 }
 
 function escapeHTML(value) {
@@ -158,16 +193,12 @@ function escapeHTML(value) {
 }
 
 function sendIndex(response, name, entries) {
-  const links = entries.map(
-    ({ name, href }) =>
-      '<li><a href="' +
-      escapeHTML(href) +
-      '" data-name="' +
-      escapeHTML(name) +
-      '">' +
-      escapeHTML(name) +
-      '</a></li>',
-  )
+  const links = entries.map(({ name, href, thumbnail, size, modified }) => {
+    const preview = thumbnail
+      ? ` data-thumbnail="${escapeHTML(thumbnail)}" data-size="${size}" data-modified="${modified}"`
+      : ''
+    return `<li><a href="${escapeHTML(href)}" data-name="${escapeHTML(name)}"${preview}>${escapeHTML(name)}</a></li>`
+  })
   const title = 'Index of ' + escapeHTML(name)
   const body =
     '<!doctype html><html><head><meta charset="utf-8"><meta name="view-directory-index" content="1"><title>' +
@@ -181,30 +212,50 @@ function sendIndex(response, name, entries) {
   send(response, 200, body, 'text/html; charset=utf-8')
 }
 
-async function readEntries(target, root) {
-  const entries = []
-  for (const item of await readdir(target, { withFileTypes: true })) {
-    let type = item
+async function readEntry(item, target, root, withThumbnails, excludedRoot) {
+  let itemPath = path.join(target, item.name)
+  if (excludedRoot && contained(excludedRoot, itemPath)) return null
+  let info = item
+  const eligible = withThumbnails && supportsThumbnail(item.name)
+  try {
     if (item.isSymbolicLink()) {
-      try {
-        const resolved = await realpath(path.join(target, item.name))
-        if (!contained(root, resolved)) continue
-        type = await stat(resolved)
-      } catch {
-        continue
-      }
+      itemPath = await realpath(itemPath)
+      if (!contained(root, itemPath) || (excludedRoot && contained(excludedRoot, itemPath))) return null
+      info = await stat(itemPath)
+    } else if (item.isFile() && eligible) {
+      info = await lstat(itemPath)
     }
-    if (type.isDirectory() || type.isFile()) {
-      entries.push({
-        name: item.name,
-        href: encodeURIComponent(item.name) + (type.isDirectory() ? '/' : ''),
-      })
-    }
+  } catch (error) {
+    if (!['ENOENT', 'ENOTDIR', 'ELOOP', 'EACCES', 'EPERM'].includes(error.code)) throw error
+    // A metadata lookup failure should not hide an ordinary file from the directory list.
+    return item.isFile() ? { name: item.name, href: encodeURIComponent(item.name) } : null
+  }
+  if (!info.isDirectory() && !info.isFile()) return null
+  const href = encodeURIComponent(item.name) + (info.isDirectory() ? '/' : '')
+  const entry = { name: item.name, href }
+  if (info.isFile() && eligible && supportsThumbnail(itemPath)) {
+    entry.thumbnail = href + '?thumbnail=1'
+    entry.size = info.size
+    entry.modified = info.mtime.toISOString()
+  }
+  return entry
+}
+
+async function readEntries(target, root, withThumbnails, excludedRoot) {
+  const items = await readdir(target, { withFileTypes: true })
+  const entries = []
+  // Bound stat concurrency when an album contains thousands of pictures.
+  for (let offset = 0; offset < items.length; offset += 32) {
+    const batch = items.slice(offset, offset + 32)
+    const results = await Promise.all(
+      batch.map((item) => readEntry(item, target, root, withThumbnails, excludedRoot)),
+    )
+    entries.push(...results.filter(Boolean))
   }
   return entries
 }
 
-async function sendFile(request, response, target, root, shared) {
+async function sendFile(request, response, target, root, shared, excludedRoot) {
   const handle = await open(
     target,
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
@@ -216,6 +267,7 @@ async function sendFile(request, response, target, root, shared) {
     if (
       !info.isFile() ||
       !contained(root, resolved) ||
+      (excludedRoot && contained(excludedRoot, resolved)) ||
       current.dev !== info.dev ||
       current.ino !== info.ino
     ) {
@@ -251,7 +303,15 @@ async function sendFile(request, response, target, root, shared) {
   }
 }
 
-export async function startSharing({ webRoot, getShares, accessKey, host = '0.0.0.0', port = 0 }) {
+export async function startSharing({
+  webRoot,
+  getShares,
+  getThumbnail,
+  thumbnailCacheDirectory,
+  accessKey,
+  host = '0.0.0.0',
+  port = 0,
+}) {
   if (typeof accessKey !== 'string' || !accessKey) throw new Error('A sharing access key is required')
   const auth = sessions(accessKey)
   const appRoot = await realpath(webRoot)
@@ -272,14 +332,21 @@ export async function startSharing({ webRoot, getShares, accessKey, host = '0.0.
       send(response, 200, JSON.stringify({ mode: 'hosted' }), 'application/json')
       return
     }
-    if (segments[0] !== 'files') {
+    const shared = segments[0] === 'files'
+    if (shared && !auth.authorized(request.headers.cookie))
+      throw new HttpError(401, 'Authentication required')
+    const excludedRoot =
+      thumbnailCacheDirectory && (await realLocation(path.resolve(thumbnailCacheDirectory)))
+    if (!shared) {
       if (!segments.length) segments.push('index.html')
-      const { target, canonicalRoot } = await resolveInside(appRoot, segments)
+      const { target, canonicalRoot } = await resolveInside(appRoot, segments, excludedRoot)
       if (!(await stat(target)).isFile()) throw new HttpError(404, 'Not found')
-      await sendFile(request, response, target, canonicalRoot, false)
+      await sendFile(request, response, target, canonicalRoot, false, excludedRoot)
       return
     }
-    if (!auth.authorized(request.headers.cookie)) throw new HttpError(401, 'Authentication required')
+    const thumbnail = new URLSearchParams(request.url.slice(pathname.length)).get('thumbnail') === '1'
+    if (thumbnail && (!getThumbnail || segments.length < 3))
+      throw new HttpError(404, 'Thumbnail unavailable')
     const shares = await getShares()
     if (segments.length === 1) {
       if (!pathname.endsWith('/')) {
@@ -289,15 +356,21 @@ export async function startSharing({ webRoot, getShares, accessKey, host = '0.0.
       sendIndex(
         response,
         '/files/',
-        shares.map(({ name, id }) => ({ name, href: encodeURIComponent(id) + '/' })),
+        (await visibleShares(shares, excludedRoot)).map(({ name, id }) => ({
+          name,
+          href: encodeURIComponent(id) + '/',
+        })),
       )
       return
     }
     const share = shares.find((item) => item.id === segments[1])
     if (!share) throw new HttpError(404, 'Not found')
-    const { canonicalRoot, target } = await resolveInside(share.path, segments.slice(2))
+    const sharePath = share.path
+    const relative = segments.slice(2)
+    const { canonicalRoot, target } = await resolveInside(sharePath, relative, excludedRoot)
     const info = await stat(target)
     if (info.isDirectory()) {
+      if (thumbnail) throw new HttpError(404, 'Thumbnail unavailable')
       if (!pathname.endsWith('/')) {
         response.writeHead(308, { Location: pathname + '/' }).end()
         return
@@ -305,12 +378,36 @@ export async function startSharing({ webRoot, getShares, accessKey, host = '0.0.
       sendIndex(
         response,
         [share.name, ...segments.slice(2)].join('/'),
-        await readEntries(target, canonicalRoot),
+        await readEntries(target, canonicalRoot, Boolean(getThumbnail), excludedRoot),
       )
       return
     }
     if (!info.isFile() || pathname.endsWith('/')) throw new HttpError(404, 'Not found')
-    await sendFile(request, response, target, canonicalRoot, true)
+    if (thumbnail) {
+      if (!supportsThumbnail(segments.at(-1)) || !supportsThumbnail(target))
+        throw new HttpError(404, 'Thumbnail unavailable')
+      const controller = new AbortController()
+      if (response.destroyed) return
+      const abort = () => controller.abort()
+      response.once('close', abort)
+      try {
+        const image = await getThumbnail(target, canonicalRoot, controller.signal)
+        if (!image) throw new HttpError(404, 'Thumbnail unavailable')
+        const current = await resolveInside(sharePath, relative, excludedRoot)
+        if (current.target !== target || current.canonicalRoot !== canonicalRoot)
+          throw new HttpError(404, 'Not found')
+        // The share can disappear while the generator is queued or decoding.
+        if (!(await getShares()).some((item) => item.id === segments[1] && item.path === sharePath)) {
+          throw new HttpError(404, 'Not found')
+        }
+        response.setHeader('Content-Security-Policy', "sandbox; default-src 'none'")
+        send(response, 200, image.data, image.mime)
+      } finally {
+        response.off('close', abort)
+      }
+      return
+    }
+    await sendFile(request, response, target, canonicalRoot, true, excludedRoot)
   }
 
   const server = createServer((request, response) => {

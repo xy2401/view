@@ -64,3 +64,19 @@ test('file protocol streams selected bytes and restricts access to the opened ro
     assert.equal((await fileResponse(new Request(folder.url + 'link'), library)).status, 404)
   }
 })
+
+test('opening a file grants its parent for sibling navigation, with the same URLs as directory browsing', async (t) => {
+  const { album, config, library } = await fixture(t)
+  const filename = path.join(album, '旅行 #1.txt')
+  await writeFile(filename, 'one')
+  await writeFile(path.join(album, '另一张.txt'), 'two')
+  const target = await library.openFile(filename)
+  const siblings = await library.list(target.folder.url)
+  assert.deepEqual(target.folder, await library.select(album))
+  assert.deepEqual(target.file, siblings.find((item) => item.name === '旅行 #1.txt'))
+  assert.equal(siblings.length, 2)
+  assert.equal(await library.resolveUrl(target.file.url), filename)
+  assert.deepEqual(library.state(), { favorites: [], shares: [] })
+  await assert.rejects((await openLibrary(config)).list(target.folder.url))
+  await assert.rejects(library.openFile(album), /普通文件/)
+})

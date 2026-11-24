@@ -1,5 +1,23 @@
 import type { Entry } from './types'
 
+// An authenticated server may decode a path repeatedly. Keep each credentialed request in scope.
+function safeSegment(segment: string): boolean {
+  let value = segment
+  for (let depth = 0; depth < 5; depth++) {
+    if (value === '.' || value === '..' || /[/\\\x00-\x1f\x7f]/.test(value)) return false
+    const decoded = value.replace(/%([\da-f]{2})/gi, (_, hex: string) =>
+      String.fromCharCode(parseInt(hex, 16)),
+    )
+    if (decoded === value) return true
+    value = decoded
+  }
+  return false
+}
+
+export function isSafeDavPath(pathname: string): boolean {
+  return pathname.split('/').every(safeSegment)
+}
+
 export function normalizeRemoteUrl(raw: string): string {
   let url: URL
   try {
@@ -16,7 +34,7 @@ export function normalizeRemoteUrl(raw: string): string {
 }
 
 // Listings may also contain links to parents, sorting controls and unrelated pages.
-function directChild(href: string, base: URL): URL | null {
+export function directChild(href: string, base: URL): URL | null {
   if (!href.trim()) return null
   let url: URL
   try {
@@ -86,7 +104,7 @@ function isSuccess(status?: string | null): boolean {
   return !!status && /^HTTP\/\S+\s+2\d\d\b/i.test(status.trim())
 }
 
-export function parseWebdav(xml: string, base: URL): Entry[] {
+export function parseWebdav(xml: string, base: URL, authenticated = false): Entry[] {
   const doc = new DOMParser().parseFromString(xml, 'application/xml')
   const root = doc.documentElement
   if (root.localName !== 'multistatus' || root.namespaceURI !== 'DAV:') {
@@ -95,7 +113,7 @@ export function parseWebdav(xml: string, base: URL): Entry[] {
   const entries = new Map<string, Entry>()
   for (const response of davChildren(root, 'response')) {
     const url = directChild(davChildren(response, 'href')[0]?.textContent ?? '', base)
-    if (!url) continue
+    if (!url || (authenticated && !isSafeDavPath(url.pathname))) continue
     const responseStatus = davChildren(response, 'status')[0]
     if (responseStatus && !isSuccess(responseStatus.textContent)) continue
     const props = davChildren(response, 'propstat')

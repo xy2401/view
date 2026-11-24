@@ -1,4 +1,5 @@
 import { davProperties, normalizeRemoteUrl, parseAutoindex, parseWebdav } from './remote'
+import { davFetch, davFileUrl, hasDavSession } from './davSession'
 import type { Entry, Place } from './types'
 
 export type { DesktopState, Entry, LocationRef, Place } from './types'
@@ -32,16 +33,29 @@ export async function listEntries(place: Place, url: string, signal?: AbortSigna
   } else {
     const requested = insidePlace(place, url)
     const options: RequestInit = { signal, cache: 'no-store' }
-    if (place.kind === 'webdav') {
-      options.method = 'PROPFIND'
-      options.headers = { Depth: '1', 'Content-Type': 'application/xml; charset=utf-8' }
-      options.body = davProperties
+    const isDav = place.kind === 'webdav'
+    const authenticated = isDav && hasDavSession(place.url)
+    const response = isDav
+      ? await davFetch(place.url, requested.href, {
+          ...options,
+          method: 'PROPFIND',
+          headers: { Depth: '1', 'Content-Type': 'application/xml; charset=utf-8' },
+          body: davProperties,
+        })
+      : await fetch(requested, options)
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {})
+      if (isDav && response.status === 401) throw new SourceError('WebDAV 需要身份验证。', 401)
+      if (isDav && response.status === 403) throw new SourceError('WebDAV 拒绝访问此目录，请检查账户权限。', 403)
+      throw new SourceError(`读取目录失败（HTTP ${response.status}）。`, response.status)
     }
-    const response = await fetch(requested, options)
-    if (!response.ok) throw new SourceError(`读取目录失败（HTTP ${response.status}）。`, response.status)
     const base = insidePlace(place, response.url || requested.href)
     const content = await response.text()
-    entries = place.kind === 'webdav' ? parseWebdav(content, base) : parseAutoindex(content, base)
+    entries = isDav
+      ? parseWebdav(content, base, authenticated).map((entry) =>
+          entry.directory ? entry : { ...entry, url: davFileUrl(place.url, entry.url) },
+        )
+      : parseAutoindex(content, base)
   }
   return entries.sort(
     (a, b) => Number(b.directory) - Number(a.directory) || byName.compare(a.name, b.name),

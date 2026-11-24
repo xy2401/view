@@ -43,9 +43,15 @@ export function AddLocation({ onClose, onSave }: { onClose: () => void; onSave: 
             placeholder="https://example.com/photos/"
             required
             value={address}
+            aria-describedby={kind === 'webdav' ? 'dav-login-hint' : undefined}
             onChange={(e) => setAddress(e.target.value)}
           />
         </label>
+        {kind === 'webdav' && (
+          <p className="field-hint" id="dav-login-hint">
+            需要密码的目录会在打开时提示登录。
+          </p>
+        )}
         <label className="field">
           显示名称（可选）
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="照片" />

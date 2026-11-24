@@ -444,6 +444,7 @@ dialog::backdrop { background: #15201885; }
 }
 .dialog-heading .icon-btn, .preview-heading .icon-btn { margin-left: auto; }
 .field { display: grid; gap: 7px; margin: 16px 0; font-size: 13px; font-weight: 550; }
+.field-hint { margin-top: -8px; color: var(--muted); font-size: 13px; }
 input, select, textarea {
   width: 100%;
   min-width: 0;
@@ -531,6 +532,7 @@ input::placeholder { color: #818b82; }
 .login-panel { max-width: 405px; }
 .login-panel > svg { color: var(--green); margin-bottom: 10px; }
 .login-panel h2 { font-size: 19px; font-weight: 600; }
+.dav-address { margin: 8px 0 20px; color: var(--muted); overflow-wrap: anywhere; font-size: 13px; }
 .sharing-panel { margin-bottom: 30px; }
 .sharing-panel .section-heading { justify-content: space-between; }
 .sharing-panel .status { margin: 0; padding: 3px 9px; font-size: 12px; }

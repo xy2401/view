@@ -4,6 +4,7 @@ import {
   ArrowRight,
   ChevronRight,
   CircleAlert,
+  File,
   FileStack,
   Folder,
   FolderOpen,
@@ -25,6 +26,8 @@ import {
 import { listEntries, normalizeRemoteUrl, type DesktopState, type Entry, type Place } from './sources'
 import { Files } from './browser/Files'
 import { AddLocation } from './locations/AddLocation'
+import { DavLogin } from './locations/DavLogin'
+import { closeDavSession, hasDavSession } from './sources/davSession'
 import { Sharing } from './locations/Sharing'
 import { Preview } from './viewers/Preview'
 
@@ -210,6 +213,7 @@ export default function App() {
   const [rootError, setRootError] = useState('')
   const [error, setError] = useState('')
   const [dirError, setDirError] = useState('')
+  const [davChallenge, setDavChallenge] = useState<{ directory: Directory; notice: string } | null>(null)
   const [locked, setLocked] = useState(false)
   const [key, setKey] = useState('')
   const [version, setVersion] = useState(0)
@@ -221,30 +225,64 @@ export default function App() {
   const [layout, setLayout] = useState<'list' | 'grid'>('list')
   const [preview, setPreview] = useState<Entry | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
+  const returnFocus = useRef<string | null>(null)
   const current = directory?.trail.at(-1)
+  const showDavLogin = !!directory && davChallenge?.directory === directory
   const pageTitle = current?.name ?? (section === 'sharing' ? '共享管理' : '文件位置')
   const bridge = window.viewDesktop
 
   function home(next: 'home' | 'sharing' = 'home') {
+    returnFocus.current = null
     setNavOpen(false)
     setDirectory(null)
+    setDavChallenge(null)
     setSection(next)
     setPreview(null)
     setSelected(null)
     setError('')
     setDirError('')
   }
-  function open(p: Place) {
+  const open = useCallback((p: Place, file?: Entry) => {
+    const next = { place: p, trail: [{ name: p.name, url: p.url }] }
+    returnFocus.current = null
     setNavOpen(false)
     setSection('home')
-    setDirectory({ place: p, trail: [{ name: p.name, url: p.url }] })
-    setSelected(null)
+    setDirectory(next)
+    setDavChallenge(null)
+    setSelected(file?.url ?? null)
     setEntries([])
-    setPreview(null)
+    setPreview(file ?? null)
     setError('')
     setDirError('')
     setLoading(true)
-  }
+  }, [])
+
+  useEffect(() => {
+    if (mode !== 'desktop' || !bridge) return
+    let active = true
+    let reads = Promise.resolve()
+    function drain() {
+      reads = reads
+        .then(async () => {
+          while (active) {
+            const target = await bridge!.takeOpenTarget()
+            if (!active || !target) return
+            open(localPlace(target.folder), target.file)
+          }
+        })
+        .catch((err) => {
+          if (active) setError(message(err))
+        })
+    }
+    // Launch arguments, second-instance events and native drops share this queue.
+    const unsubscribe = bridge.onOpenTarget(drain)
+    drain()
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [mode, bridge, open])
+
   function crumb(index: number) {
     if (!directory) return
     if (index === directory.trail.length - 1) return
@@ -328,13 +366,27 @@ export default function App() {
     setDirError('')
     void listEntries(directory.place, current.url, controller.signal)
       .then((result) => {
-        if (!controller.signal.aborted) setEntries(result)
+        if (controller.signal.aborted) return
+        setEntries(result)
       })
       .catch((err) => {
         if (controller.signal.aborted) return
         setEntries([])
         if (mode === 'hosted' && isUnauthorized(err)) sessionLost()
-        else setDirError(message(err))
+        else if (
+          mode === 'static' &&
+          directory.place.kind === 'webdav' &&
+          err instanceof Error &&
+          'status' in err &&
+          (err.status === 401 || err.status === 403)
+        ) {
+          const expired = hasDavSession(directory.place.url) && err.status === 401
+          if (expired) closeDavSession(directory.place.url)
+          setDavChallenge({
+            directory,
+            notice: expired ? '登录已失效，请重新登录。' : err.status === 403 ? message(err) : '',
+          })
+        } else setDirError(message(err))
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false)
@@ -376,6 +428,7 @@ export default function App() {
   function removePlace(p: Place) {
     try {
       savePlaces(places.filter((v) => v.url !== p.url || v.kind !== p.kind))
+      if (p.kind === 'webdav') closeDavSession(p.url)
     } catch {
       setError('浏览器无法保存位置，请检查存储权限。')
     }
@@ -394,20 +447,23 @@ export default function App() {
     setDirectory({ ...directory, trail: [...directory.trail, { name: entry.name, url: entry.url }] })
   }
   function closePreview() {
+    returnFocus.current = selected
     setPreview(null)
-    if (selected)
-      requestAnimationFrame(() => {
-        const target = document.querySelector<HTMLButtonElement>(
-          '[data-entry-url="' + CSS.escape(selected) + '"]',
-        )
-        target?.focus({ preventScroll: true })
-        target?.scrollIntoView({ block: 'nearest' })
-      })
   }
+  useEffect(() => {
+    if (preview || loading || !selected || returnFocus.current !== selected) return
+    const target = document.querySelector<HTMLButtonElement>('[data-entry-url="' + CSS.escape(selected) + '"]')
+    if (target) {
+      target.focus({ preventScroll: true })
+      target.scrollIntoView({ block: 'nearest' })
+      returnFocus.current = null
+    }
+  }, [preview, loading, selected, entries])
   const isFavorite = desktop?.favorites.some((p) => p.url === current?.url)
   const isShared = desktop?.shares.some((p) => p.url === current?.url)
   function refresh() {
     setError('')
+    setDavChallenge(null)
     setVersion((v) => v + 1)
     if (directory) setDirVersion((v) => v + 1)
   }
@@ -501,6 +557,21 @@ export default function App() {
             ))}
           </div>
           <div className="toolbar-actions">
+            {mode === 'desktop' && bridge && (
+              <button
+                className="btn"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    const target = await bridge.openFile()
+                    if (target) open(localPlace(target.folder), target.file)
+                  })
+                }
+              >
+                <File size={16} />
+                打开文件
+              </button>
+            )}
             <button className="icon-btn" aria-label="刷新" title="刷新" onClick={refresh}>
               <RefreshCw size={17} />
             </button>
@@ -553,6 +624,27 @@ export default function App() {
                   {isShared ? '已共享' : 'HTTP 共享'}
                 </button>
               </div>
+            )}
+            {mode === 'static' && directory?.place.kind === 'webdav' && !showDavLogin && (
+              <button
+                className="btn"
+                disabled={loading}
+                onClick={() => {
+                  if (hasDavSession(directory.place.url)) {
+                    closeDavSession(directory.place.url)
+                    setEntries([])
+                    setSelected(null)
+                    setPreview(null)
+                    setLoading(true)
+                    setDirVersion((v) => v + 1)
+                  } else {
+                    setDavChallenge({ directory, notice: '' })
+                  }
+                }}
+              >
+                <KeyRound size={16} />
+                {hasDavSession(directory.place.url) ? '退出登录' : '登录 WebDAV'}
+              </button>
             )}
           </div>
           {error && (
@@ -628,7 +720,21 @@ export default function App() {
               )}
             </section>
           )}
-          {directory && !locked && (
+          {directory && current && showDavLogin && davChallenge && (
+            <DavLogin
+              key={current.url}
+              place={directory.place}
+              url={current.url}
+              notice={davChallenge.notice}
+              onSuccess={(result) => {
+                setEntries(result)
+                setLoading(false)
+                setDirError('')
+                setDavChallenge(null)
+              }}
+            />
+          )}
+          {directory && !locked && !showDavLogin && (
             <section className="folder-section">
               <div className="section-heading">
                 <h2>文件</h2>

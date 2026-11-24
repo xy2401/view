@@ -1,4 +1,4 @@
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -38,6 +38,24 @@ try {
     out: outputDir,
     name: 'View',
     electronVersion,
+    appBundleId: 'io.github.xy2401.view',
+    extendInfo: {
+      CFBundleDocumentTypes: [
+        {
+          CFBundleTypeName: 'View documents and media',
+          CFBundleTypeRole: 'Viewer',
+          LSHandlerRank: 'Alternate',
+          LSItemContentTypes: [
+            'public.image',
+            'public.movie',
+            'public.audio',
+            'public.text',
+            'com.adobe.pdf',
+            'public.data',
+          ],
+        },
+      ],
+    },
     // The HTTP server streams the same web assets through ordinary file descriptors.
     extraResource: webDist,
     // The electron install script and Packager use the same @electron/get cache.
@@ -45,7 +63,14 @@ try {
     overwrite: true,
     prune: false,
   })
-  for (const path of paths) console.log(path)
+  for (const path of paths) {
+    if (process.platform === 'linux') {
+      const installer = join(path, 'install-open-with.sh')
+      await cp(join(desktopDir, 'scripts', 'install-open-with.sh'), installer)
+      await chmod(installer, 0o755)
+    }
+    console.log(path)
+  }
 } finally {
   await rm(stage, { recursive: true, force: true })
 }

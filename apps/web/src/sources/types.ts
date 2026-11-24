@@ -13,6 +13,11 @@ export interface Entry extends LocationRef {
   modified?: string
 }
 
+export interface OpenTarget {
+  folder: LocationRef
+  file: Entry
+}
+
 export interface DesktopState {
   favorites: LocationRef[]
   shares: LocationRef[]
@@ -22,6 +27,9 @@ export interface DesktopState {
 interface DesktopBridge {
   state(): Promise<DesktopState>
   openFolder(): Promise<LocationRef | null>
+  openFile(): Promise<OpenTarget | null>
+  takeOpenTarget(): Promise<OpenTarget | null>
+  onOpenTarget(notify: () => void): () => void
   list(url: string): Promise<Entry[]>
   setFavorite(url: string, value: boolean): Promise<void>
   setShared(url: string, value: boolean): Promise<void>

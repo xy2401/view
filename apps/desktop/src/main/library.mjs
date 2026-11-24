@@ -51,6 +51,21 @@ export async function openLibrary(configPath) {
     return { name: nameOf(target), url: urlFor(target, true) }
   }
 
+  function grantDirectory(root) {
+    if (![...grants.values()].some((parent) => within(parent, root))) grants.set(randomUUID(), root)
+    return place(root)
+  }
+
+  function entry(target, info) {
+    return {
+      name: nameOf(target),
+      directory: info.isDirectory(),
+      url: urlFor(target, info.isDirectory()),
+      size: info.isFile() ? info.size : undefined,
+      modified: info.mtime.toISOString(),
+    }
+  }
+
   async function resolveUrl(input) {
     const url = new URL(input)
     const root = grants.get(url.hostname)
@@ -109,8 +124,14 @@ export async function openLibrary(configPath) {
     async select(directory) {
       const root = await realpath(directory)
       if (!(await stat(root)).isDirectory()) throw new Error('请选择文件夹')
-      if (![...grants.values()].some((parent) => within(parent, root))) grants.set(randomUUID(), root)
-      return place(root)
+      return grantDirectory(root)
+    },
+    async openFile(filename) {
+      const target = await realpath(filename)
+      const info = await stat(target)
+      if (!info.isFile()) throw new Error('请选择普通文件')
+      const folder = grantDirectory(path.dirname(target))
+      return { folder, file: entry(target, info) }
     },
     async list(url) {
       const dir = await resolveUrl(url)
@@ -125,13 +146,7 @@ export async function openLibrary(configPath) {
             try {
               const metadata = await lstat(target)
               if (!metadata.isDirectory() && !metadata.isFile()) return null
-              return {
-                name: file.name,
-                directory: metadata.isDirectory(),
-                url: urlFor(target, metadata.isDirectory()),
-                size: metadata.isFile() ? metadata.size : undefined,
-                modified: metadata.mtime.toISOString(),
-              }
+              return entry(target, metadata)
             } catch (error) {
               if (error.code === 'ENOENT') return null
               if (error.code === 'EACCES' || error.code === 'EPERM') {

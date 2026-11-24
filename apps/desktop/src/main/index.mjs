@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startSharing } from '../sharing/server.mjs'
 import { openLibrary } from './library.mjs'
+import { filesFromArgv } from './open-files.mjs'
 import { createAssetHandler, fileResponse } from './protocols.mjs'
 
 const appUrl = 'view-app://app/index.html'
@@ -15,6 +16,35 @@ const webRoot = app.isPackaged
 let window
 let server
 let serviceQueue = Promise.resolve()
+const pendingFiles = []
+let windowReady = false
+
+function focusWindow() {
+  if (!windowReady) return
+  if (window) {
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+  } else {
+    void createWindow()
+  }
+}
+
+function queueOpenFiles(files) {
+  for (const file of files) {
+    if (typeof file === 'string' && path.isAbsolute(file) && !pendingFiles.includes(file)) {
+      pendingFiles.push(file)
+    }
+  }
+  focusWindow()
+  if (pendingFiles.length && window) window.webContents.send('view:openTarget')
+}
+
+// Finder can deliver the initial document before the application is ready.
+app.on('open-file', (event, filename) => {
+  event.preventDefault()
+  queueOpenFiles([filename])
+})
 
 protocol.registerSchemesAsPrivileged(
   ['view-app', 'view-file'].map((scheme) => ({
@@ -97,6 +127,24 @@ async function initialize() {
   }
 
   register('state', () => ({ ...library.state(), server: server?.info ?? null }))
+  register('openFile', async () => {
+    const result = await dialog.showOpenDialog(window, { title: '打开文件', properties: ['openFile'] })
+    return result.canceled || !result.filePaths.length ? null : library.openFile(result.filePaths[0])
+  })
+  register('nativeDrop', (filename) => queueOpenFiles([filename]))
+  register('takeOpenTarget', async () => {
+    let unavailable
+    while (pendingFiles.length) {
+      const filename = pendingFiles.shift()
+      try {
+        return await library.openFile(filename)
+      } catch {
+        unavailable = path.basename(filename)
+      }
+    }
+    if (unavailable) throw new Error('无法打开文件：' + unavailable)
+    return null
+  })
   register('openFolder', async () => {
     const result = await dialog.showOpenDialog(window, {
       title: '打开文件夹',
@@ -127,16 +175,18 @@ async function initialize() {
     return server.info.url + '#pair=' + encodeURIComponent(server.service.createPairingToken())
   })
 
+  windowReady = true
   await createWindow()
-  app.on('activate', () => {
-    if (!window) void createWindow()
-  })
+  app.on('activate', focusWindow)
 }
 
-if (app.requestSingleInstanceLock()) {
-  app.on('second-instance', () => {
-    if (window?.isMinimized()) window.restore()
-    window?.focus()
+const launchFiles = filesFromArgv(process.argv, process.cwd(), process.defaultApp)
+if (app.requestSingleInstanceLock({ files: launchFiles })) {
+  queueOpenFiles(launchFiles)
+  app.on('second-instance', (_event, argv, cwd, data) => {
+    // Chromium can reorder argv for forwarded instances. Prefer the paths
+    // the second process already resolved relative to its own working directory.
+    queueOpenFiles(Array.isArray(data?.files) ? data.files : filesFromArgv(argv, cwd, process.defaultApp))
   })
   app
     .whenReady()

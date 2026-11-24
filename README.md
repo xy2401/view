@@ -18,7 +18,19 @@ pnpm install --frozen-lockfile
 | `pnpm build` | 检查 TypeScript 并生成静态站点，可将 `apps/web/dist/` 整个目录部署到 Web 服务器。 |
 | `pnpm package:desktop` | 在 `dist/desktop/` 生成当前平台的桌面应用目录。 |
 | `pnpm test` | 验证文件头识别、模型取样、桌面目录和 HTTP 共享服务。 |
-| `pnpm test:browser` | 构建网页，使用 Chromium 打开真实文件并验证 Magika 识别。首次运行可用 `pnpm exec playwright install chromium` 安装浏览器，或用 `VIEW_CHROMIUM_PATH` 指定已有的 Chromium 可执行文件。 |
+| `pnpm test:browser` | 构建网页，用 Chromium 验证文件预览、Magika 识别和 WebDAV 登录后的媒体读取。可用 `pnpm exec playwright install chromium` 安装浏览器，或用 `VIEW_CHROMIUM_PATH` 指定已有的 Chromium 可执行文件。 |
+
+## 从电脑上打开一张照片
+
+点桌面端的「打开文件」，或把照片拖进 View 窗口。预览中按 ← 或 → 可以浏览同目录的照片和视频，按 Esc 会回到目录并选中刚看的文件。想把这个目录固定到首页，再点「收藏」。
+
+也可以从系统文件管理器的「打开方式」选择 View。Windows 的便携版可手动选择 `View.exe`。Linux 先把应用目录放到常用位置，再执行随包的 `./install-open-with.sh`，即可为当前用户注册 View。移动应用目录后需重新运行脚本。
+
+## 登录 WebDAV
+
+在静态网页版点「添加位置」，协议选 WebDAV，填入目录地址。打开受保护的目录时，输入 WebDAV 服务器的用户名和密码。当前支持 HTTP Basic 认证。登录只对这个标签页里的这个位置生效，图片、PDF 和音视频预览共用这次登录。点目录页的「退出登录」或重新加载网页后，再次打开受保护的目录需要重新登录。
+
+部署静态网页时使用 HTTPS，本机开发也可使用 localhost。浏览器在这个站点的 Service Worker 中把视频的 Range 请求转给 WebDAV，服务器支持分段读取时即可按需取用视频数据。
 
 ## 打开后缀缺失或标错的文件
 

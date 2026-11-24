@@ -76,7 +76,9 @@ Node 在 `/` 托管 Web App，在 `/files/` 提供 autoindex。桌面端维护�
 
 目录页沿用熟悉的路径导航、列表和缩略图网格。进入查看器时保留所在目录、排序、选中项和滚动位置；退出时定位到最后看到的条目。桌面支持键盘操作，iPad 提供相应的触控操作。排序选项和快捷键细节随原型打磨。
 
-首次集成以图片、浏览器原生支持的音视频、PDF 和文本为例。目录可先按名称展示图标，可见区域再加载缩略图。缺少后缀、类型信息冲突或默认查看器打开失败时，可以按需使用 Magika 识别内容，再选择查看器。大文件保留流式读取路径；未知类型显示基本信息，单个文件预览失败不影响继续浏览。媒体解码扩展和 FFmpeg 选型留给有代表性的样片决定。[Magika JS](https://github.com/google/magika/tree/main/js)
+首版查看器支持图片、浏览器原生支持的音视频、PDF 和文本。列表按名称展示图标，网格在可见区域加载缩略图。打开条目时，先请求开头 4 KiB，按文件签名选择查看器；签名无法判断时参考后缀。用户还可以点「识别格式」，由本机 Worker 使用 Magika 的 `standard_v3_3` 模型判断内容类型。模型随静态站点和桌面应用分发。在支持范围请求的来源上，模型读取大文件的首尾各 4 KiB，小文件取完整内容。[Magika JS](https://github.com/google/magika/tree/main/js)
+
+桌面 PDF 查看器按页所需的数据读取本地文件，每个范围请求最多 64 KiB。读取总量取决于 PDF 结构和当前页面。媒体解码扩展和 FFmpeg 选型留给有代表性的样片决定。
 
 图标建议用 Codicons 表示收藏、返回和切换视图等操作，用 Seti 的文件名和扩展名映射显示文件图标。缩略图就绪后，网格优先显示真实内容。集成时保留素材所需的署名和许可声明。[Codicons](https://github.com/microsoft/vscode-codicons) · [Seti](https://github.com/microsoft/vscode/tree/main/extensions/theme-seti)
 

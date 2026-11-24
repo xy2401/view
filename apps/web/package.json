@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test src/sources/*.test.mjs"
   },
   "dependencies": {
     "lucide-react": "0.577.0",
+    "magika": "1.0.0",
     "pdfjs-dist": "5.4.624",
     "qrcode": "1.5.4",
     "react": "19.3.1",

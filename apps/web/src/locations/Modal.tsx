@@ -28,6 +28,8 @@ export function Modal({
       className={className}
       aria-label={label}
       onCancel={(e) => {
+        if (e.target !== e.currentTarget) return
+        e.stopPropagation()
         e.preventDefault()
         onClose()
       }}

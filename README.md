@@ -17,7 +17,14 @@ pnpm install --frozen-lockfile
 | `pnpm desktop` | 构建共享界面并启动 Electron。首次启动会下载当前平台的 Electron。 |
 | `pnpm build` | 检查 TypeScript 并生成静态站点，可将 `apps/web/dist/` 整个目录部署到 Web 服务器。 |
 | `pnpm package:desktop` | 在 `dist/desktop/` 生成当前平台的桌面应用目录。 |
-| `pnpm test` | 运行桌面目录、文件读取与 HTTP 共享服务的回归测试。 |
+| `pnpm test` | 验证文件头识别、模型取样、桌面目录和 HTTP 共享服务。 |
+| `pnpm test:browser` | 构建网页，使用 Chromium 打开真实文件并验证 Magika 识别。首次运行可用 `pnpm exec playwright install chromium` 安装浏览器，或用 `VIEW_CHROMIUM_PATH` 指定已有的 Chromium 可执行文件。 |
+
+## 打开后缀缺失或标错的文件
+
+点开文件时，View 请求开头的 4 KiB 来选择查看器。例如，一份名叫 `旅行.jpg` 的 PDF 会进入 PDF 查看器，无后缀的 PNG 可以直接看图。浏览目录列表时只读取目录。列表和网格里的文件图标仍按名称匹配，网格会读取可见图片以显示缩略图。
+
+预览底部的「识别格式」可用 Magika 进一步判断文件类型。模型随应用分发，点按钮后才在本机的 Worker 中加载。对支持 Range 的大文件，识别时只取首尾各 4 KiB；只有完整内容不超过 8 KiB 时，才能在不支持 Range 的来源上运行模型。识别出可用的其他查看器时，可以直接切换。
 
 ## 从 iPad 看电脑上的照片
 

@@ -687,7 +687,6 @@ export default function App() {
       )}
       {preview && (
         <Preview
-          key={preview.url}
           entry={preview}
           entries={entries}
           onSelect={(e) => {

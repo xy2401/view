@@ -1,2 +1,9 @@
 packages:
   - apps/*
+
+allowBuilds:
+  core-js: false
+
+# The shared renderer uses Magika's browser entry point in both Web and Electron.
+ignoredOptionalDependencies:
+  - '@tensorflow/tfjs-node'

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { getDocument, GlobalWorkerOptions, type PDFDocumentProxy, type RenderTask } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import { localPdfSource } from './localPdfRange'
 
 GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -13,23 +14,26 @@ export default function Pdf({ url }: { url: string }) {
   useEffect(() => {
     const controller = new AbortController()
     let task: ReturnType<typeof getDocument> | undefined
+    setDoc(null)
+    setError('')
+    setPage(1)
+    function fail() {
+      if (controller.signal.aborted) return
+      setError('无法打开 PDF，文件可能已变化、损坏或受密码保护。')
+      controller.abort()
+      void task?.destroy()
+    }
     async function load() {
-      let source: { data: Uint8Array } | { url: string }
-      if (new URL(url).protocol === 'view-file:') {
-        // PDF.js's network loader accepts HTTP URLs. Electron serves local bytes
-        // through its scoped file protocol, which the renderer can fetch directly.
-        const res = await fetch(url, { signal: controller.signal })
-        if (!res.ok) throw new Error('无法读取 PDF')
-        source = { data: new Uint8Array(await res.arrayBuffer()) }
-      } else source = { url }
+      const source =
+        new URL(url).protocol === 'view-file:'
+          ? await localPdfSource(url, controller.signal, fail)
+          : { url }
       if (controller.signal.aborted) return
       task = getDocument({ ...source, isEvalSupported: false, useWasm: false })
       const result = await task.promise
       if (!controller.signal.aborted) setDoc(result)
     }
-    void load().catch(() => {
-      if (!controller.signal.aborted) setError('无法打开 PDF，文件可能已损坏或受密码保护。')
-    })
+    void load().catch(fail)
     return () => {
       controller.abort()
       void task?.destroy()

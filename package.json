@@ -2,12 +2,18 @@
   "name": "view-workspace",
   "private": true,
   "packageManager": "pnpm@11.25.0",
-  "engines": { "node": ">=22.13.0" },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "dev": "pnpm --filter @view/web dev",
     "build": "pnpm --filter @view/web build",
     "desktop": "pnpm build && pnpm --filter @view/desktop start",
     "package:desktop": "pnpm build && pnpm --filter @view/desktop package",
-    "test": "pnpm --filter @view/desktop test"
+    "test": "pnpm --filter @view/web test && pnpm --filter @view/desktop test",
+    "test:browser": "pnpm build && node --test tests/browser/*.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.65.1"
   }
 }

@@ -8,7 +8,11 @@ import { createThumbnailCache } from './thumbnail-cache.mjs'
 
 async function fixture(t) {
   const base = await realpath(await mkdtemp(path.join(tmpdir(), 'view-thumb-')))
-  t.after(() => rm(base, { recursive: true, force: true }))
+  const caches = []
+  t.after(async () => {
+    for (const cache of caches) cache.close()
+    await rm(base, { recursive: true, force: true })
+  })
   const directory = path.join(base, 'cache')
   const root = path.join(base, 'photos')
   await mkdir(root)
@@ -18,7 +22,12 @@ async function fixture(t) {
     await writeFile(filename, 'source')
     return filename
   }
-  return { directory, root, file }
+  function openCache(generate) {
+    const cache = createThumbnailCache({ directory, generate })
+    caches.push(cache)
+    return cache
+  }
+  return { directory, root, file, openCache }
 }
 
 function image(text) {
@@ -26,13 +35,13 @@ function image(text) {
 }
 
 test('creates one SQLite file per requested root and reuses only current thumbnails across restarts', async (t) => {
-  const { root, directory, file } = await fixture(t)
+  const { root, directory, file, openCache } = await fixture(t)
   const first = await file('a/name.jpg')
   const second = await file('b/name.jpg')
   await file('a/unseen.jpg')
   let renders = 0
   const generate = async () => image('render-' + ++renders)
-  const cache = createThumbnailCache({ directory, generate })
+  const cache = openCache(generate)
   await assert.rejects(access(directory), { code: 'ENOENT' })
   assert.equal(await cache.get(root, path.join(root, '..', 'outside')), null)
   await assert.rejects(access(directory), { code: 'ENOENT' })
@@ -43,16 +52,18 @@ test('creates one SQLite file per requested root and reuses only current thumbna
   const [dbName] = await readdir(directory)
   assert.match(dbName, /^[a-f0-9]{64}\.sqlite$/)
   const db = new DatabaseSync(path.join(directory, dbName), { readOnly: true })
-  assert.deepEqual(
-    db
-      .prepare('SELECT path FROM thumbnails ORDER BY path')
-      .all()
-      .map((r) => r.path),
-    [path.join('a', 'name.jpg'), path.join('b', 'name.jpg')],
-  )
-  db.close()
-  const restored = createThumbnailCache({ directory, generate })
-  t.after(() => restored.close())
+  try {
+    assert.deepEqual(
+      db
+        .prepare('SELECT path FROM thumbnails ORDER BY path')
+        .all()
+        .map((r) => r.path),
+      [path.join('a', 'name.jpg'), path.join('b', 'name.jpg')],
+    )
+  } finally {
+    db.close()
+  }
+  const restored = openCache(generate)
   assert.deepEqual(await restored.get(root, first), image('render-1'))
   await utimes(first, new Date(1000), new Date(1000))
   assert.deepEqual(await restored.get(root, first), image('render-3'))
@@ -62,21 +73,17 @@ test('creates one SQLite file per requested root and reuses only current thumbna
 })
 
 test('shares generations, bounds active decoders, and drops queued work whose consumer left', async (t) => {
-  const { root, directory, file } = await fixture(t)
+  const { root, file, openCache } = await fixture(t)
   const [a, b, c] = await Promise.all(['a.jpg', 'b.jpg', 'c.jpg'].map(file))
   const running = []
   const entered = [Promise.withResolvers(), Promise.withResolvers()]
   const release = Promise.withResolvers()
-  const cache = createThumbnailCache({
-    directory,
-    generate: async (filename) => {
-      running.push(filename)
-      entered[running.length - 1]?.resolve()
-      await release.promise
-      return image(path.basename(filename))
-    },
+  const cache = openCache(async (filename) => {
+    running.push(filename)
+    entered[running.length - 1]?.resolve()
+    await release.promise
+    return image(path.basename(filename))
   })
-  t.after(() => cache.close())
   const first = cache.get(root, a)
   await entered[0].promise
   const duplicate = cache.get(root, a)
@@ -103,54 +110,43 @@ test('shares generations, bounds active decoders, and drops queued work whose co
 })
 
 test('discards a thumbnail if its source changed during decode and recovers from corrupt cache bytes', async (t) => {
-  const { root, directory, file } = await fixture(t)
+  const { root, directory, file, openCache } = await fixture(t)
   const filename = await file('image.jpg')
-  const unstable = createThumbnailCache({
-    directory,
-    generate: async () => {
-      await writeFile(filename, 'replaced during render')
-      return image('stale')
-    },
+  const unstable = openCache(async () => {
+    await writeFile(filename, 'replaced during render')
+    return image('stale')
   })
   assert.equal(await unstable.get(root, filename), null)
   unstable.close()
   const [name] = await readdir(directory)
   await writeFile(path.join(directory, name), 'invalid SQLite bytes')
-  const cache = createThumbnailCache({ directory, generate: async () => image('new') })
+  const cache = openCache(async () => image('new'))
   assert.deepEqual(await cache.get(root, filename), image('new'))
   cache.close()
   let calls = 0
-  const restored = createThumbnailCache({
-    directory,
-    generate: async () => {
-      calls++
-      return null
-    },
+  const restored = openCache(async () => {
+    calls++
+    return null
   })
-  t.after(() => restored.close())
   assert.deepEqual(await restored.get(root, filename), image('new'))
   assert.equal(calls, 0)
 })
 
 test('retiring a nested root removes only its database and prevents late requests from recreating it', async (t) => {
-  const { root, directory, file } = await fixture(t)
+  const { root, directory, file, openCache } = await fixture(t)
   const first = await file('child/first.jpg')
   const second = await file('child/second.jpg')
   const untouched = await file('sibling/untouched.jpg')
   const child = path.dirname(first)
   const entered = Promise.withResolvers()
   const release = Promise.withResolvers()
-  const cache = createThumbnailCache({
-    directory,
-    generate: async (filename) => {
-      if (filename === second) {
-        entered.resolve()
-        await release.promise
-      }
-      return image(path.basename(filename))
-    },
+  const cache = openCache(async (filename) => {
+    if (filename === second) {
+      entered.resolve()
+      await release.promise
+    }
+    return image(path.basename(filename))
   })
-  t.after(() => cache.close())
   await cache.get(child, first)
   const [childDatabase] = await readdir(directory)
   await cache.get(path.dirname(untouched), untouched)

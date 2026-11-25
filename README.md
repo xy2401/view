@@ -3,6 +3,16 @@ Browser is only you have
 
 View 是一个只读文件浏览器。桌面端可以打开、收藏和共享本地文件夹，静态网页版可以添加 HTTP autoindex 或 WebDAV 地址。局域网里的 iPad 可以通过浏览器查看电脑共享的全部目录。
 
+## 下载桌面版
+
+在 GitHub Actions 的 **Build desktop apps** 中打开一次成功的运行，进入 **Artifacts**，下载对应系统的文件。Windows x64 提供 ZIP，解压后运行 `View.exe`。macOS 提供 Apple Silicon（arm64）和 Intel（x64）两种 ZIP，解压后打开 `View.app`。Linux x64 提供 `.tar.gz`，解压后运行 `View`。[桌面构建记录](https://github.com/xy2401/view/actions/workflows/desktop.yml)
+
+有仓库写入权限的用户可以点 **Run workflow** 并选择 `all`、`windows`、`macos` 或 `linux`。默认构建全部平台，选 `macos` 会生成两种架构的应用。
+
+## 发布静态网站
+
+首次部署时，在仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**。推送到 `main` 后，**Static website** 会构建 `apps/web/dist/` 并发布到 GitHub Pages。也可以在 Actions 中选择该工作流，在 `main` 上手动运行。发布成功后，部署任务的 **github-pages** 环境会显示网站地址。[静态网站发布记录](https://github.com/xy2401/view/actions/workflows/pages.yml)
+
 ## 本地运行
 
 使用 Node.js 22.13 或更高版本和 pnpm 11.25.0，在仓库根目录安装依赖。
